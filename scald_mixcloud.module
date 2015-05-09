@@ -1,0 +1,156 @@
+<?php
+/**
+ * @file
+ *   Defines a Mixcloud provider for Scald.
+ */
+
+define('MIXCLOUD_WEB_REGEXP',       '#^https?://([-\w]+\.)?mixcloud\.com/(.+$)#');
+define('MIXCLOUD_WEB',              'https://mixcloud.com');
+
+/**
+ * Implements hook_scald_atom_providers.
+ * Tell Scald that we'll be providing some Mixcloud atoms.
+ */
+function scald_mixcloud_scald_atom_providers() {
+  return array(
+    'audio' => 'Audio hosted on Mixcloud'
+  );
+}
+
+function scald_mixcloud_scald_add_form(&$form, &$form_state) {
+  $form['identifier'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Mixcloud identifier or URL'),
+    '#element_validate' => array('scald_mixcloud_validate_id'),
+    '#default_value' => '',
+  );
+}
+
+/**
+ * Implements hook_scald_add_form_fill.
+ */
+function scald_mixcloud_scald_add_form_fill(&$atoms, $form, $form_state) {
+  $atom = is_array($atoms) ? reset($atoms) : $atoms;
+
+  // Get the identifier
+  $identifier = scald_mixcloud_parse_id($form_state['values']['identifier'], TRUE);
+
+  // Get track info
+  $infos = scald_mixcloud_get_audio($identifier);
+
+  $atom->base_id = $identifier;
+  $atom->title = $infos->title;
+
+  // Prefill the author
+  $atom->scald_authors[LANGUAGE_NONE][0] = array(
+    'tid' => 0,
+    'taxonomy_term' => (object)(array('name' => $infos->author))
+  );
+  if (isset($infos->thumbnail)) {
+    // Download a copy of the audio thumbnail. This makes it possible
+    // to do interesting manipulation with image styles presets.
+    $thumb = drupal_http_request($infos->thumbnail);
+    if ($thumb->code == 200) {
+      $dest = 'public://mixcloud/' . $infos->id . '.jpg';
+      if (file_prepare_directory(dirname($dest), FILE_CREATE_DIRECTORY)) {
+        $file = file_save_data($thumb->data, $dest);
+      }
+    }
+
+    // Set the file status to temporary
+    $query = db_update('file_managed')
+      ->condition('fid', $file->fid)
+      ->fields(array('status' => 0))
+      ->execute();
+
+    $atom->scald_thumbnail[LANGUAGE_NONE][0] = (array)$file;
+  }
+  $atom->data['html'] = $infos->html;
+}
+
+/**
+ * Implements hook_scald_fetch.
+ */
+function scald_mixcloud_scald_fetch($atom, $type) {
+  $file_items = field_get_items('scald_atom', $atom, 'scald_thumbnail');
+  if (!empty($file_items)) {
+    $file_item = current($file_items);
+    if (file_exists($file_item['uri'])) {
+      $atom->file_source = $atom->thumbnail_source = $file_item['uri'];
+    }
+  }
+}
+
+/**
+ * Implements hook_scald_prerender.
+ */
+function scald_mixcloud_scald_prerender($atom, $context, $options, $mode) {
+  if ($mode == 'atom') {
+    $atom->rendered->player = $atom->data['html'];
+  }
+}
+
+/**
+ * Checks if an audio has already been imported, based on its audio id.
+ */
+function scald_mixcloud_already_imported($id) {
+  $query = array('provider' => 'scald_mixcloud', 'base_id' => $id);
+  return scald_search($query, FALSE, TRUE);
+}
+
+/**
+ * Form element validation handler for Mixcloud identifier
+ */
+function scald_mixcloud_validate_id($element, &$form_state) {
+  // $id = scald_mixcloud_parse_id($form_state['values']['identifier'], TRUE);
+  // if (!$id) {
+  //   form_error($element, t('Invalid Mixcloud ID or URL.'));
+  // }
+  // elseif (scald_mixcloud_already_imported($id)) {
+  //   form_error($element, t('Mixcloud track already imported.'));
+  // }
+}
+
+
+/**
+ * Parse an Audio ID and check validity
+ */
+function scald_mixcloud_parse_id($string, $check) {
+  return $string;
+}
+
+/**
+ * Get all necessary on an given audio track using Mixcloud API
+ * @param $url
+ *   Unique identifier of the audio track on Mixcloud
+ * @return object
+ *   Object containing all necessary info.
+ */
+function scald_mixcloud_get_audio($url) {
+
+  try {
+    // Fetch data for a track or playlist
+    $data = json_decode(file_get_contents("https://www.mixcloud.com/oembed/?url=".$url."&format=json"));;
+  }
+  catch (Exception $e) {
+    watchdog('scald_mixcloud', 'Exception : @exception', array('@exception' => $e->getMessage()));
+    return FALSE;
+  }
+
+  $info = new stdClass();
+
+  // ID
+  $info->id = uniqid();
+  // Title
+  $info->title = $data->title;
+  // Author
+  $info->author = $data->author_name;
+  // Thumbnail
+  if ($data->image) {
+    $info->thumbnail = "https:".$data->image;
+  }
+  // Embed code
+  $info->html = $data->html;
+
+  return $info;
+}

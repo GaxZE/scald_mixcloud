@@ -1,0 +1,6 @@
+name = Scald Mixcloud
+description = Provides Audio atoms from Mixcloud.
+package = Scald Providers
+core = 7.x
+dependencies[] = scald
+
