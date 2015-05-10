@@ -4,9 +4,6 @@
  *   Defines a Mixcloud provider for Scald.
  */
 
-define('MIXCLOUD_WEB_REGEXP',       '#^https?://([-\w]+\.)?mixcloud\.com/(.+$)#');
-define('MIXCLOUD_WEB',              'https://mixcloud.com');
-
 /**
  * Implements hook_scald_atom_providers.
  * Tell Scald that we'll be providing some Mixcloud atoms.
@@ -46,15 +43,14 @@ function scald_mixcloud_scald_add_form_fill(&$atoms, $form, $form_state) {
     'tid' => 0,
     'taxonomy_term' => (object)(array('name' => $infos->author))
   );
+
+  // Grab the thumbnail
   if (isset($infos->thumbnail)) {
-    // Download a copy of the audio thumbnail. This makes it possible
-    // to do interesting manipulation with image styles presets.
+    // Download a copy of the audio thumbnail.
     $thumb = drupal_http_request($infos->thumbnail);
     if ($thumb->code == 200) {
       $dest = 'public://mixcloud/' . $infos->id . '.jpg';
-      if (file_prepare_directory(dirname($dest), FILE_CREATE_DIRECTORY)) {
-        $file = file_save_data($thumb->data, $dest);
-      }
+      $file = file_save_data($thumb->data, $dest);
     }
 
     // Set the file status to temporary
@@ -65,7 +61,15 @@ function scald_mixcloud_scald_add_form_fill(&$atoms, $form, $form_state) {
 
     $atom->scald_thumbnail[LANGUAGE_NONE][0] = (array)$file;
   }
-  $atom->data['html'] = $infos->html;
+
+  // Prefill tags
+  foreach ($infos->tags as $index => $tag) {
+    $atom->scald_tags[LANGUAGE_NONE][$index] = array(
+      'tid' => $index,
+      'taxonomy_term' => (object)(array('name' => $tag->name))
+    );
+  }
+
 }
 
 /**
@@ -86,7 +90,15 @@ function scald_mixcloud_scald_fetch($atom, $type) {
  */
 function scald_mixcloud_scald_prerender($atom, $context, $options, $mode) {
   if ($mode == 'atom') {
-    $atom->rendered->player = $atom->data['html'];
+    try {
+      // Fetch data for a track or playlist
+      $embed = json_decode(file_get_contents("https://www.mixcloud.com/oembed/?url=".$atom->base_id."&format=json"));
+    }
+    catch (Exception $e) {
+      watchdog('scald_mixcloud', 'Exception : @exception', array('@exception' => $e->getMessage()));
+      return FALSE;
+    }
+    $atom->rendered->player = $embed->html;
   }
 }
 
@@ -99,20 +111,15 @@ function scald_mixcloud_already_imported($id) {
 }
 
 /**
+ * TODO:
  * Form element validation handler for Mixcloud identifier
  */
 function scald_mixcloud_validate_id($element, &$form_state) {
-  // $id = scald_mixcloud_parse_id($form_state['values']['identifier'], TRUE);
-  // if (!$id) {
-  //   form_error($element, t('Invalid Mixcloud ID or URL.'));
-  // }
-  // elseif (scald_mixcloud_already_imported($id)) {
-  //   form_error($element, t('Mixcloud track already imported.'));
-  // }
 }
 
 
 /**
+ * TODO:
  * Parse an Audio ID and check validity
  */
 function scald_mixcloud_parse_id($string, $check) {
@@ -128,29 +135,33 @@ function scald_mixcloud_parse_id($string, $check) {
  */
 function scald_mixcloud_get_audio($url) {
 
+  // Grab artist and track from URL
+  $url = array_filter(explode('/', parse_url($url)['path']));
+  $artist = $url[1];
+  $track = $url[2];
+
   try {
     // Fetch data for a track or playlist
-    $data = json_decode(file_get_contents("https://www.mixcloud.com/oembed/?url=".$url."&format=json"));;
+    $data = json_decode(file_get_contents("https://api.mixcloud.com/".$artist."/".$track));
   }
   catch (Exception $e) {
     watchdog('scald_mixcloud', 'Exception : @exception', array('@exception' => $e->getMessage()));
     return FALSE;
   }
-
   $info = new stdClass();
 
   // ID
-  $info->id = uniqid();
+  $info->id = preg_replace('/^-+|-+$/', '', strtolower(preg_replace('/[^a-zA-Z0-9]+/', '-', $data->key)));
   // Title
-  $info->title = $data->title;
+  $info->title = $data->name;
   // Author
-  $info->author = $data->author_name;
+  $info->author = $data->user->name;
   // Thumbnail
-  if ($data->image) {
-    $info->thumbnail = "https:".$data->image;
+  if ($data->pictures) {
+    $info->thumbnail = $data->pictures->medium;
   }
-  // Embed code
-  $info->html = $data->html;
+  // Tags
+  $info->tags = $data->tags;
 
   return $info;
 }
